@@ -32,27 +32,94 @@ async def test_imports():
     
     return True
 
+def _parse_ollama_list_output(text: str):
+    """Parse `ollama list` output into a list of model names (first column)."""
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # Skip header line if present (starts with "NAME")
+    if lines and lines[0].lower().startswith("name"):
+        lines = lines[1:]
+    models = []
+    for ln in lines:
+        # model name is the first whitespace-separated token
+        parts = ln.split()
+        if parts:
+            models.append(parts[0])
+    return models
+
+
+def _detect_ollama_containers():
+    """Return list of running docker containers that look like ollama."""
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "--format", "{{.ID}} {{.Names}} {{.Image}}"],
+            capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            return []
+        rows = [r for r in proc.stdout.splitlines() if r.strip()]
+        out = []
+        for r in rows:
+            cid, cname, *rest = r.split()
+            image = " ".join(rest) if rest else ""
+            if "ollama" in (cname + " " + image).lower():
+                out.append((cid, cname, image))
+        return out
+    except FileNotFoundError:
+        # docker not installed
+        return []
+
+
+def _ollama_list_native():
+    """Run `ollama list` on the host."""
+    try:
+        proc = subprocess.run(["ollama", "list"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return _parse_ollama_list_output(proc.stdout), "native"
+    except FileNotFoundError:
+        pass
+    return [], "native"
+
+
+def _ollama_list_in_container(container_name_or_id: str):
+    """Run `ollama list` inside a docker container."""
+    proc = subprocess.run(
+        ["docker", "exec", container_name_or_id, "ollama", "list"],
+        capture_output=True, text=True
+    )
+    if proc.returncode == 0:
+        return _parse_ollama_list_output(proc.stdout), f"docker:{container_name_or_id}"
+    return [], f"docker:{container_name_or_id}"
 
 def check_available_models():
-    """Check what models are actually available in Ollama."""
-    try:
-        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')[1:]  # Skip header
-            models = []
-            for line in lines:
-                if line.strip():
-                    # Parse model name from the first column
-                    model_name = line.split()[0] if line.split() else ""
-                    if model_name:
-                        models.append(model_name)
+    """Check what models are actually available in Ollama (native or Docker)."""
+    # 1) Try native
+    models, source = _ollama_list_native()
+    if models:
+        return models
+
+    # 2) Try Docker (respect env override if set)
+    preferred = os.environ.get("OLLAMA_CONTAINER", "").strip()
+    if preferred:
+        models, source = _ollama_list_in_container(preferred)
+        if models:
+            print(f"(info) Models read from Docker container '{preferred}'")
             return models
         else:
-            print(f"Could not list models: {result.stderr}")
-            return []
-    except Exception as e:
-        print(f"Could not check available models: {e}")
+            print(f"(info) No models returned by container '{preferred}'. Falling back to auto-detect.")
+
+    containers = _detect_ollama_containers()
+    if not containers:
+        # nothing found anywhere
         return []
+
+    # If multiple containers, pick the first for non-interactive verification.
+    cid, cname, image = containers[0]
+    models, _ = _ollama_list_in_container(cname or cid)
+    if models:
+        print(f"(info) Models read from Docker container '{cname or cid}' ({image})")
+    return models
 
 
 async def test_model_detection():
