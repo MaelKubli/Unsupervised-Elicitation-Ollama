@@ -285,9 +285,11 @@ class OllamaModel(ModelAPIProtocol):
                 response = ollama.generate(
                     model=model_id,
                     prompt=formatted_prompt,
+                    stream=False, #New Code MK 2025-08-20 (ensure a single JSON response)
                     options={
                         'temperature': temperature,
                         'num_predict': max_tokens,
+                        'logprobs': kwargs.get('logprobs', 5), # New Code MK 2025-08-20 (request per-token logprobs)
                     }
                 )
                 return response
@@ -301,6 +303,7 @@ class OllamaModel(ModelAPIProtocol):
             
             # Extract response text
             completion = response.get('response', '')
+            ollama_logprobs = response.get('logprobs') # New Code MK 2025-08-20 (top-level in Ollama)
             
             # Determine stop reason
             if response.get('done_reason') == 'length':
@@ -316,7 +319,7 @@ class OllamaModel(ModelAPIProtocol):
                 duration=duration,
                 api_duration=api_duration,
                 cost=0.0,  # Ollama is free/local
-                logprobs=None,  # Ollama doesn't provide logprobs by default
+                logprobs=ollama_logprobs,  # New Code MK 2025-08-20 (Ollama doesn't provide logprobs by default hence we pass through Ollama's per-token logprobs)
             )
             
             return [llm_response]
@@ -409,8 +412,15 @@ class OllamaModel(ModelAPIProtocol):
         duration = time.time() - start
         LOGGER.debug(f"Completed Ollama call to {model_id} in {duration:.2f}s")
         
-        # Return in the expected format for the codebase
-        return [{"prompt": prompt, "response": response.to_dict()} for response in responses]
+        # Return in the expected format for the codebase NEW Code MK 2025-08-20
+        #return [{"prompt": prompt, "response": response.to_dict()} for response in responses] ### OLD CODE
+        # Return in the expected format for the codebase (include metadata for uid)
+        metadata = kwargs.get("metadata") or {}
+        return [{
+            "prompt": prompt,
+            "response": resp.to_dict(),  # contains 'completion' and 'logprobs'
+            "metadata": metadata,
+        } for resp in responses]
 
 
 # Alias for consistency with other model classes
